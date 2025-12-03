@@ -1,36 +1,31 @@
 import os
-from flask import Flask
+from flask import Flask, request
 from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
 
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(TOKEN)
 
-# Flask just to keep service alive (no webhook)
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Filter Bot Running (Polling)!", 200
-
-# In-memory filters
-filters = {}
+filters_data = {}  # chat wise filters
 
 
-# ------------------- ADMIN CHECK -------------------
+# ---------------- ADMIN CHECK ----------------
 def is_admin(chat_id, user_id):
     try:
-        m = bot.get_chat_member(chat_id, user_id)
-        return m.status in ["administrator", "creator"]
+        member = bot.get_chat_member(chat_id, user_id)
+        return member.status in ["administrator", "creator"]
     except:
         return False
 
 
-# ------------------- COMMANDS -------------------
+# ---------------- START ----------------
 def start(update, context):
-    update.message.reply_text("🤖 Filter Bot Activated!")
+    update.message.reply_text("🤖 Filter Bot Activated with Webhook!")
 
 
+# ---------------- ADD FILTER ----------------
 def add_filter(update, context):
     msg = update.message
     chat_id = msg.chat_id
@@ -40,12 +35,12 @@ def add_filter(update, context):
         return msg.reply_text("⚠️ Only admins can add filters.")
 
     if not context.args:
-        return msg.reply_text("❌ Usage: Reply sticker/photo/text → `/f keyword`")
+        return msg.reply_text("❌ Usage: reply sticker/photo/text → `/f keyword`")
 
     keyword = context.args[0].lower()
 
     if not msg.reply_to_message:
-        return msg.reply_text("❌ Reply to a message to set filter.")
+        return msg.reply_text("❌ Reply to message to set filter.")
 
     rep = msg.reply_to_message
 
@@ -62,62 +57,65 @@ def add_filter(update, context):
         file_id = rep.text
 
     else:
-        return msg.reply_text("❌ Unsupported media type.")
+        return msg.reply_text("❌ Unsupported message type.")
 
-    if chat_id not in filters:
-        filters[chat_id] = {}
+    if chat_id not in filters_data:
+        filters_data[chat_id] = {}
 
-    filters[chat_id][keyword] = file_id
+    filters_data[chat_id][keyword] = file_id
 
-    msg.reply_text(f"✅ Filter added for: `{keyword}`", parse_mode="Markdown")
+    msg.reply_text(f"✅ Filter set for: `{keyword}`", parse_mode="Markdown")
 
 
+# ---------------- REMOVE FILTER ----------------
 def stop_filter(update, context):
     msg = update.message
     chat_id = msg.chat_id
     user_id = msg.from_user.id
 
     if not is_admin(chat_id, user_id):
-        return msg.reply_text("⚠️ Only admins can remove filters.")
+        return msg.reply_text("⚠️ Admin only!")
 
     if not context.args:
         return msg.reply_text("❌ Usage: `/fstop keyword`")
 
     keyword = context.args[0].lower()
 
-    if chat_id in filters and keyword in filters[chat_id]:
-        del filters[chat_id][keyword]
+    if chat_id in filters_data and keyword in filters_data[chat_id]:
+        del filters_data[chat_id][keyword]
         msg.reply_text(f"🗑 Removed filter: `{keyword}`", parse_mode="Markdown")
     else:
         msg.reply_text("❌ Filter not found.")
 
 
+# ---------------- LIST FILTERS ----------------
 def list_filters(update, context):
     chat_id = update.message.chat_id
 
-    if chat_id not in filters or not filters[chat_id]:
-        return update.message.reply_text("📭 No filters set.")
+    if chat_id not in filters_data or not filters_data[chat_id]:
+        return update.message.reply_text("📭 No filters available.")
 
     text = "📌 **Active Filters:**\n\n"
-    for k in filters[chat_id]:
+    for k in filters_data[chat_id]:
         text += f"• `{k}`\n"
 
     update.message.reply_text(text, parse_mode="Markdown")
 
 
+# ---------------- REMOVE ALL FILTERS ----------------
 def stop_all(update, context):
     msg = update.message
     chat_id = msg.chat_id
     user_id = msg.from_user.id
 
     if not is_admin(chat_id, user_id):
-        return msg.reply_text("⚠️ Only admins can clear all filters.")
+        return msg.reply_text("⚠️ Admin only!")
 
-    filters[chat_id] = {}
-    msg.reply_text("🚫 All filters removed.")
+    filters_data[chat_id] = {}
+    msg.reply_text("🚫 All filters cleared.")
 
 
-# ------------------- AUTO FILTER -------------------
+# ---------------- AUTO FILTER RESPONSE ----------------
 def auto_filter(update, context):
     msg = update.message
     if not msg or not msg.text:
@@ -126,10 +124,10 @@ def auto_filter(update, context):
     chat_id = msg.chat_id
     text = msg.text.lower()
 
-    if chat_id not in filters:
+    if chat_id not in filters_data:
         return
 
-    for keyword, file_id in filters[chat_id].items():
+    for keyword, file_id in filters_data[chat_id].items():
         if keyword in text:
 
             # Try sticker
@@ -146,32 +144,38 @@ def auto_filter(update, context):
             except:
                 pass
 
-            # Default text
+            # Text fallback
             bot.send_message(chat_id, file_id)
             return
 
 
-# ------------------- MAIN -------------------
-def main():
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("f", add_filter))
-    dp.add_handler(CommandHandler("fstop", stop_filter))
-    dp.add_handler(CommandHandler("flist", list_filters))
-    dp.add_handler(CommandHandler("fstopall", stop_all))
-
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, auto_filter))
-
-    updater.start_polling()
-    updater.idle()
+# ---------------- FLASK WEBHOOK ----------------
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, bot)
+    dispatcher.process_update(update)
+    return "OK", 200
 
 
+@app.route("/")
+def home():
+    return "Filter Bot Running with Webhook!", 200
+
+
+# ---------------- DISPATCHER ----------------
+from telegram.ext import Dispatcher
+
+dispatcher = Dispatcher(bot, None, workers=0)
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("f", add_filter))
+dispatcher.add_handler(CommandHandler("fstop", stop_filter))
+dispatcher.add_handler(CommandHandler("flist", list_filters))
+dispatcher.add_handler(CommandHandler("fstopall", stop_all))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, auto_filter))
+
+
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
-    # Flask ko background me run karo (Render needs this)
-    from threading import Thread
-    Thread(target=lambda: app.run(host="0.0.0.0", port=10000)).start()
-
-    # Bot polling
-    main()
+    PORT = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=PORT)
